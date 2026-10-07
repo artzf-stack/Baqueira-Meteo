@@ -4,6 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Baqueira Meteo</title>
+<meta name="theme-color" content="#0259a3">
+<meta name="application-name" content="Baqueira Meteo">
+<meta name="apple-mobile-web-app-title" content="Baqueira">
+<link rel="icon" href="favicon.png" type="image/png" sizes="64x64">
+<link rel="icon" href="icon-192.png" type="image/png" sizes="192x192">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="manifest.json">
 <style>
 /* Layout: una columna de hasta 960 px. Controles y leyenda arriba, resumen del modelo de
    referencia, comparación entre modelos, gráficos (temperatura, precipitación, viento,
@@ -52,6 +59,8 @@ h2{font-size:15px;font-weight:650;margin:0 0 2px}
 .sub-h{font-size:12px;font-weight:600;color:var(--ink2);margin:14px 0 4px}
 .sub-h:first-child{margin-top:4px}
 .top{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;justify-content:space-between}
+.brand{display:flex;gap:12px;align-items:center;min-width:0}
+.logo{width:64px;height:64px;border-radius:12px;flex:none;display:block;background:#fff;box-shadow:0 0 0 1px var(--ring)}
 .status{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--muted)}
 button,select,input{font:inherit;color:inherit}
 button{cursor:pointer}
@@ -142,9 +151,12 @@ details.diag summary{cursor:pointer;font-size:13px;font-weight:600;min-height:32
 </svg>
 <div class="wrap" id="app">
   <div class="top">
-    <div>
-      <h1>Baqueira, hora a hora</h1>
-      <p class="sub">Val d'Aran · AROME, IFS e ICON-EU · temperatura, precipitación (lluvia o nieve) y viento</p>
+    <div class="brand">
+      <img class="logo" src="icon-192.png" width="64" height="64" alt="Logo de Baqueira/Beret">
+      <div>
+        <h1>Baqueira, hora a hora</h1>
+        <p class="sub">Val d'Aran · AROME, IFS e ICON-EU · temperatura, precipitación (lluvia o nieve), viento y nubosidad</p>
+      </div>
     </div>
     <div class="status">
       <span id="updated">Cargando datos…</span>
@@ -252,6 +264,7 @@ details.diag summary{cursor:pointer;font-size:13px;font-weight:600;min-height:32
     <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a> con licencia CC BY 4.0.
     Previsión orientativa. El viento es el del modelo a 10 m y en las crestas suele ser mayor.
     Para salir de pista consulta siempre el boletín oficial de aludes.
+    Página personal, no oficial: el logo de Baqueira/Beret pertenece a sus titulares y esta web no está afiliada a la estación.
   </p>
 </div>
 
