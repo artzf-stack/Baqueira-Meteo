@@ -1,6 +1,6 @@
 {
-  "name": "Baqueira Meteo",
-  "short_name": "Baqueira",
+  "name": "Meteo Baqueira",
+  "short_name": "Meteo Baqueira",
   "description": "Previsión hora a hora para Baqueira, Val d'Aran",
   "lang": "es",
   "start_url": "./",
