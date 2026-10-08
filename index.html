@@ -135,6 +135,17 @@ tr.day td{text-align:left;font-weight:600;color:var(--ink2);background:var(--was
 .foot a{color:var(--ink2)}
 details.diag summary{cursor:pointer;font-size:13px;font-weight:600;min-height:32px;display:flex;align-items:center}
 .diag td,.diag th{font-size:12px}
+.cx-h{font-size:13px;font-weight:600;margin:20px 0 4px}
+.cx-m{font-size:13px;font-weight:600;margin:14px 0 4px}
+.cx-t{border-collapse:separate;border-spacing:4px;width:100%;max-width:420px;table-layout:fixed;margin:0 -4px}
+.cx-t td{padding:6px 2px;text-align:center;border-radius:8px;background:var(--surface);box-shadow:0 0 0 1px var(--ring);line-height:1.35;font-variant-numeric:tabular-nums;white-space:normal}
+.cx-t td.c{box-shadow:0 0 0 2px var(--ink2)}
+.cx-t td small{display:block;color:var(--muted);font-size:11px}
+.cx-s{font-size:12px;color:var(--muted);margin:4px 0 0}
+.cx-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px;font-size:12px;color:var(--muted)}
+.cx-row select{min-height:36px;font-size:13px}
+#cxMap{height:340px;max-width:100%;border-radius:10px;box-shadow:0 0 0 1px var(--ring);margin-top:8px}
+.leaflet-tooltip.cxt{background:var(--surface);color:var(--ink);border:0;box-shadow:0 0 0 1px var(--ring);padding:2px 5px;font-size:11px;line-height:1.3;text-align:center}
 .diag td.l{text-align:left;white-space:normal}
 .loading .chart,.loading .tiles,.loading .tbl-wrap{opacity:.65}
 @media (prefers-reduced-motion: no-preference){.chart,.tiles,.tbl-wrap{transition:opacity .2s}}
@@ -256,6 +267,10 @@ details.diag summary{cursor:pointer;font-size:13px;font-weight:600;min-height:32
       <p class="hint">Estado de cada llamada a Open-Meteo. Si algo no cuadra, copia este diagnóstico y envíalo.</p>
       <div class="tbl-wrap"><table id="diagTbl"></table></div>
       <p><button class="btn" id="copyDiag" type="button">Copiar diagnóstico</button> <span class="muted" id="copyMsg"></span></p>
+      <h3 class="cx-h">Celdas vecinas de cada modelo</h3>
+      <p class="hint">Pide a Open-Meteo las 9 celdas (3×3) que rodean a la que usa el panel, con su altura media y la lluvia prevista en 48 h, para valorar si alguna vecina representa mejor el relieve. Solo se consulta al pulsar el botón (una petición por modelo).</p>
+      <p><button class="btn" id="cellsBtn" type="button">Consultar celdas vecinas</button> <span class="muted" id="cellsMsg"></span></p>
+      <div id="cellsOut"></div>
     </details>
   </section>
 
@@ -309,12 +324,14 @@ MODELS.forEach(function(m){ MODEL_BY_ID[m.id] = m; m.ok = false; m.err = null; m
 
 /* ================= Estado ================= */
 var STORE_KEY = 'baqueira-meteo-v1';
-var state = {alt:1800, win:48, ref:'arome_hd', mode:'temp', cut:1, ratio:10, vis:{arome_hd:true, arome:true, ifs:true, icon:true}};
+var STORE_VER = 2;   // v2: el AROME 2,5 km pasa a estar oculto por defecto (mismo modelo que el de 1,5 km)
+var state = {v:STORE_VER, alt:1800, win:48, ref:'arome_hd', mode:'temp', cut:1, ratio:10, vis:{arome_hd:true, arome:false, ifs:true, icon:true}};
 try{
   var saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
   if(saved){
     ['alt','win','ref','mode','cut','ratio'].forEach(function(k){ if(saved[k] !== undefined) state[k] = saved[k]; });
     if(saved.vis) MODELS.forEach(function(m){ if(saved.vis[m.id] !== undefined) state.vis[m.id] = !!saved.vis[m.id]; });
+    if((saved.v || 1) < STORE_VER) state.vis.arome = false;   // ajustes guardados con la versión anterior
   }
 }catch(e){}
 if(CONFIG.windows.indexOf(state.win) < 0) state.win = 48;   // ventana guardada que ya no existe
@@ -462,9 +479,10 @@ function loadSurface(model){
     model.rawTimes = h0.time;
     model.raw = arr.map(function(o){ return o.hourly; });
     model.grid = {lat:arr[0].latitude, lon:arr[0].longitude, elev:arr[0].elevation};
+    model.grids = arr.map(function(o, k){ return {alt:CONFIG.altitudes[k] ? CONFIG.altitudes[k].m : null, lat:o.latitude, lon:o.longitude, elev:o.elevation}; });
     var temps = h0.temperature_2m || [], n = 0;
     for(var i = 0; i < temps.length; i++){ if(temps[i] !== null) n++; }
-    d.ok = true; d.msg = note; d.url = url; d.hours = n; d.empty = emptyVars(h0, usedVars); d.grid = model.grid; d.ms = Date.now() - d.t0;
+    d.ok = true; d.msg = note; d.url = url; d.hours = n; d.empty = emptyVars(h0, usedVars); d.grid = model.grid; d.grids = model.grids; d.ms = Date.now() - d.t0;
     model.ok = true; model.err = null; model.stale = false;
   }).catch(function(e){
     d.ok = false; d.msg = e.message; d.url = url; d.ms = Date.now() - d.t0;
@@ -652,12 +670,14 @@ function visibleModels(){ return MODELS.filter(function(m){ return m.ok && state
 function altLabel(){ return fmtK(state.alt) + ' m'; }
 
 /* ================= Gráficos ================= */
+// Marcas del eje: el día a las 00:00 y las horas de esquí (9, 13 y 17 h). Si no caben, solo las 13 h.
 function xTickList(times, N, pw){
-  var out = [], step = (pw / Math.max(1, N - 1)) * 6 < 38 ? 12 : 6;
+  var out = [], gap = (pw / Math.max(1, N - 1)) * 4;          // píxeles entre marcas de 4 h
+  var all = gap >= 24, unit = gap >= 34 ? ' h' : 'h';
   for(var i = 0; i < N; i++){
     var t = parseT(times[i]);
     if(t.h === 0) out.push({i:i, label:DOW[t.dow] + ' ' + t.d, major:true});
-    else if(t.h % step === 0) out.push({i:i, label:pad(t.h) + ' h', major:false});
+    else if(t.h === 13 || (all && (t.h === 9 || t.h === 17))) out.push({i:i, label:t.h + unit, major:false});
   }
   return out;
 }
@@ -829,7 +849,8 @@ function renderPrecip(){
 function skyWord(v){ return v < 20 ? 'despejado' : v < 50 ? 'poco nuboso' : v < 80 ? 'nuboso' : 'cubierto'; }
 // Modelo que tiene datos de esa variable: primero la referencia, luego los visibles y por último cualquiera.
 function pickModel(name){
-  var cand = [refModel()].concat(visibleModels(), MODELS.filter(function(m){ return m.ok; }));
+  var rf = refModel(), sib = rf && rf.id === 'arome_hd' ? MODEL_BY_ID.arome : rf && rf.id === 'arome' ? MODEL_BY_ID.arome_hd : null;
+  var cand = [rf, sib].concat(visibleModels(), MODELS.filter(function(m){ return m.ok; }));
   for(var i = 0; i < cand.length; i++){
     var m = cand[i];
     if(m && m.ok && hasData(ser(m, name))) return m;
@@ -1010,7 +1031,8 @@ function renderFreeze(){
   var host = $('chF'); clear(host);
   var N = winLen(), times = MASTER.slice(0, N), list = [];
   MODELS.forEach(function(m){
-    if(!m.L || !state.vis[m.id]) return;
+    var shown = m.id === 'arome' ? (state.vis.arome || state.vis.arome_hd) : state.vis[m.id];
+    if(!m.L || !shown) return;
     var f = m.L.freeze.slice(0, N), s = m.L.snowlevel.slice(0, N);
     if(hasData(f)) list.push({name:m.name + ' · 0 °C', color:m.color, vals:f, width:2});
     if(hasData(s)) list.push({name:m.name + ' · cota de nieve', color:m.color, vals:s, width:1.6, dash:'3 4', opacity:'0.9', noDot:true});
@@ -1131,6 +1153,16 @@ function renderHourly(){
     H('td', null, C && C[i] !== null ? fmt(C[i], 0) + ' %' : '–', tr);
   }
 }
+// Centro de la celda que Open-Meteo usó (latitud, longitud). Con varias cotas puede variar de una a otra.
+function gridText(d){
+  var gs = d.grids;
+  if(gs && gs.length > 1){
+    var f = gs[0], same = gs.every(function(g){ return g.lat === f.lat && g.lon === f.lon; });
+    if(same) return fmt(f.lat, 4) + ', ' + fmt(f.lon, 4) + ' (igual a todas las cotas)';
+    return gs.map(function(g){ return fmtK(g.alt) + ' m: ' + fmt(g.lat, 4) + ', ' + fmt(g.lon, 4); }).join(' · ');
+  }
+  return d.grid ? fmt(d.grid.lat, 4) + ', ' + fmt(d.grid.lon, 4) : '–';
+}
 function renderDiag(){
   var tbl = $('diagTbl'); clear(tbl);
   var head = H('tr', null, null, H('thead', null, null, tbl));
@@ -1147,7 +1179,7 @@ function renderDiag(){
     H('td', null, String(d.hours), tr);
     H('td', null, d.ms === null ? '–' : fmt(d.ms / 1000, 1) + ' s', tr);
     H('td', {'class':'l'}, d.empty && d.empty.length ? d.empty.join(', ') : 'nada', tr);
-    H('td', {'class':'l'}, d.grid ? fmt(d.grid.lat, 3) + ', ' + fmt(d.grid.lon, 3) + ' · ' + fmtK(d.grid.elev) + ' m' : '–', tr);
+    H('td', {'class':'l'}, gridText(d), tr);
   });
 }
 function diagText(){
@@ -1157,9 +1189,145 @@ function diagText(){
   DIAG.forEach(function(d){
     var st = d.ok === null ? 'PENDIENTE ' + Math.round((Date.now() - d.t0) / 1000) + ' s' : d.ok ? 'ok' : 'ERROR';
     lines.push([d.model, d.kind, st, d.msg || '', d.hours + ' h', d.ms === null ? '–' : (d.ms / 1000).toFixed(1) + ' s',
-                'sin datos: ' + (d.empty && d.empty.length ? d.empty.join(',') : 'nada'), d.url].join(' | '));
+                'sin datos: ' + (d.empty && d.empty.length ? d.empty.join(',') : 'nada'),
+                'celda: ' + (d.grids && d.grids.length ? d.grids.map(function(g){ return (g.alt || '') + 'm=' + g.lat + ',' + g.lon; }).join(' ') : d.grid ? d.grid.lat + ',' + d.grid.lon : '–'),
+                d.url].join(' | '));
   });
+  if(CELLS.data){
+    lines.push('celdas vecinas (cota ' + CELLS.alt + ' m) · filas de norte a sur, columnas de oeste a este · lat,lon,altura media m,lluvia 48 h mm');
+    MODELS.forEach(function(m){
+      var d = CELLS.data[m.id]; if(!d) return;
+      lines.push(m.name + ' | ' + (d.err ? 'ERROR ' + d.err : d.pts.map(function(c){ return [c.lat, c.lon, c.elev, c.p === null ? '–' : c.p.toFixed(1)].join(','); }).join(' ; ')));
+    });
+  }
   return lines.join('\n');
+}
+
+/* ================= Celdas vecinas (solo en el diagnóstico, bajo demanda) ================= */
+var CELLSTEP = {arome_hd:0.01, arome:0.025, icon:0.0625, ifs:0.1};   // paso de rejilla esperado de cada modelo (°)
+var CELLS = {busy:false, data:null, alt:null, at:null};              // data[id] = {c:{lat,lon}, pts:[9 celdas] | err}
+var LMAP = null, LMODEL = null;
+function cellCenter(m){
+  var gs = m.grids;
+  return gs && gs.length ? gs[Math.min(altIndex(), gs.length - 1)] : null;
+}
+function cellsUrl(m, c){
+  var st = CELLSTEP[m.id], la = [], lo = [], el = [];
+  for(var i = 1; i >= -1; i--){ for(var j = -1; j <= 1; j++){ la.push((c.lat + i * st).toFixed(4)); lo.push((c.lon + j * st).toFixed(4)); el.push('nan'); } }
+  return API + '?latitude=' + la.join(',') + '&longitude=' + lo.join(',') + '&elevation=' + el.join(',') +
+    '&hourly=precipitation&models=' + m.api + '&forecast_hours=48&cell_selection=nearest&timezone=' + encodeURIComponent(CONFIG.tz);
+}
+function loadCells(){
+  if(CELLS.busy) return;
+  var todo = MODELS.filter(function(m){ return cellCenter(m); });
+  if(!todo.length){ $('cellsMsg').textContent = 'Espera a que carguen los datos del panel.'; return; }
+  CELLS.busy = true; CELLS.data = {}; CELLS.alt = state.alt; CELLS.at = null;
+  $('cellsBtn').disabled = true; $('cellsMsg').textContent = 'Consultando…';
+  renderCells();
+  var steps = todo.map(function(m){
+    return function(){
+      var c = cellCenter(m);
+      return fetchRetry(cellsUrl(m, c)).then(function(j){
+        var arr = Array.isArray(j) ? j : [j], pts = [];
+        arr.forEach(function(o, k){
+          var pr = (o.hourly && o.hourly.precipitation) || [], tot = 0, n = 0;
+          for(var q = 0; q < pr.length; q++){ if(pr[q] !== null && pr[q] !== undefined){ tot += pr[q]; n++; } }
+          pts.push({k:k, lat:o.latitude, lon:o.longitude, elev:o.elevation, p:n ? tot : null, n:n});
+        });
+        if(pts.length !== 9) throw new Error('respuesta con ' + pts.length + ' celdas en lugar de 9');
+        CELLS.data[m.id] = {c:c, pts:pts};
+      }, function(e){ CELLS.data[m.id] = {c:c, err:e.message}; }).then(function(){ renderCells(); });
+    };
+  });
+  runPool(steps, 2).then(function(){
+    CELLS.busy = false; CELLS.at = new Date();
+    $('cellsBtn').disabled = false; $('cellsBtn').textContent = 'Volver a consultar';
+    $('cellsMsg').textContent = 'Consultado a las ' + pad(CELLS.at.getHours()) + ':' + pad(CELLS.at.getMinutes());
+    renderCells();
+  });
+}
+function renderCells(){
+  var host = $('cellsOut'); clear(host);
+  if(!CELLS.data) return;
+  MODELS.forEach(function(m){
+    var d = CELLS.data[m.id]; if(!d) return;
+    H('div', {'class':'cx-m'}, m.name + ' · cota ' + fmtK(CELLS.alt) + ' m · celda del panel ' + fmt(d.c.lat, 4) + ', ' + fmt(d.c.lon, 4), host);
+    if(d.err){ var er = H('p', {'class':'cx-s'}, 'Error: ' + d.err, host); er.style.color = 'var(--bad)'; return; }
+    var best = -1, bd = Infinity, emin = Infinity, emax = -Infinity, pmin = Infinity, pmax = -Infinity, seen = {};
+    d.pts.forEach(function(c, k){
+      seen[Number(c.lat).toFixed(3) + ',' + Number(c.lon).toFixed(3)] = 1;
+      if(c.elev !== null && c.elev !== undefined){
+        var dd = Math.abs(c.elev - CELLS.alt); if(dd < bd){ bd = dd; best = k; }
+        if(c.elev < emin) emin = c.elev; if(c.elev > emax) emax = c.elev;
+      }
+      if(c.p !== null){ if(c.p < pmin) pmin = c.p; if(c.p > pmax) pmax = c.p; }
+    });
+    var tb = H('tbody', null, null, H('table', {'class':'cx-t'}, null, host));
+    for(var r = 0; r < 3; r++){
+      var tr = H('tr', null, null, tb);
+      for(var q = 0; q < 3; q++){
+        var k = r * 3 + q, c = d.pts[k];
+        var td = H('td', {title:fmt(c.lat, 4) + ', ' + fmt(c.lon, 4)}, null, tr);
+        if(k === 4) td.className = 'c';
+        var e = c.elev === null || c.elev === undefined ? '–' : fmtK(c.elev) + ' m';
+        H('b', null, (k === best ? '● ' : '') + e, td);
+        H('small', null, c.elev === null || c.elev === undefined ? '' : 'Δ ' + (c.elev - CELLS.alt >= 0 ? '+' : '−') + fmtK(Math.abs(Math.round(c.elev - CELLS.alt))) + ' m', td);
+        H('small', null, c.p === null ? 'sin datos' : fmt(c.p, 0) + ' mm', td);
+      }
+    }
+    var txt = 'Altura media de las 9 celdas: ' + (emin === Infinity ? '–' : fmtK(emin) + '–' + fmtK(emax) + ' m') + ' · lluvia en 48 h: ' + (pmin === Infinity ? '–' : fmt(pmin, 0) + '–' + fmt(pmax, 0) + ' mm') + ' · ● = la más cercana a tu cota (' + fmtK(CELLS.alt) + ' m). Filas de norte a sur, columnas de oeste a este.';
+    if(Object.keys(seen).length < 9) txt += ' Algunas vecinas devuelven la misma celda: la rejilla de este modelo no es regular o su paso no es el esperado.';
+    H('p', {'class':'cx-s'}, txt, host);
+  });
+  if(!CELLS.busy && CELLS.at){
+    var row = H('div', {'class':'cx-row'}, null, host);
+    H('span', null, 'Mapa de', row);
+    var sel = H('select', {id:'cxSel', 'aria-label':'Modelo del mapa'}, null, row);
+    MODELS.forEach(function(m){ if(CELLS.data[m.id] && CELLS.data[m.id].pts){ var o = H('option', {value:m.id}, m.name, sel); if(m.id === (LMODEL || 'arome_hd')) o.selected = true; } });
+    var bt = H('button', {type:'button', 'class':'btn', id:'cxBtn'}, 'Ver en el mapa', row);
+    bt.addEventListener('click', function(){ showCellMap($('cxSel').value); });
+    sel.addEventListener('change', function(){ if(LMAP) showCellMap(sel.value); });
+    var mb = H('div', {id:'cxMapBox'}, null, host);
+    if(LMAP && LMODEL && CELLS.data[LMODEL]){ showCellMap(LMODEL); }
+    else { LMAP = null; }
+  }
+}
+function withLeaflet(cb, fail){
+  if(window.L){ cb(); return; }
+  var css = document.createElement('link'); css.rel = 'stylesheet'; css.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css'; document.head.appendChild(css);
+  var sc = document.createElement('script'); sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js';
+  sc.onload = function(){ if(window.L) cb(); else fail(); }; sc.onerror = fail;
+  document.head.appendChild(sc);
+}
+function cssVar(name){ return (getComputedStyle(document.documentElement).getPropertyValue(name) || '').trim() || '#555'; }
+function showCellMap(id){
+  var m = MODEL_BY_ID[id], d = CELLS.data && CELLS.data[id], box = $('cxMapBox');
+  if(!m || !d || !d.pts || !box) return;
+  withLeaflet(function(){
+    if(LMAP){ LMAP.remove(); LMAP = null; }
+    clear(box); box.style.display = '';
+    var el = H('div', {id:'cxMap'}, null, box);
+    var st = CELLSTEP[id], col = cssVar((m.color.match(/--[\w-]+/) || ['--ink2'])[0]);
+    var map = L.map(el, {scrollWheelZoom:false});
+    var topo = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {maxZoom:17, attribution:'OpenTopoMap, OpenStreetMap'});
+    var osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19, attribution:'OpenStreetMap'});
+    topo.addTo(map); L.control.layers({'Relieve':topo, 'Calles':osm}, null, {collapsed:true}).addTo(map);
+    var all = [], best = -1, bd = Infinity;
+    d.pts.forEach(function(c, k){ if(c.elev !== null && c.elev !== undefined){ var dd = Math.abs(c.elev - CELLS.alt); if(dd < bd){ bd = dd; best = k; } } });
+    d.pts.forEach(function(c, k){
+      var b = [[c.lat - st / 2, c.lon - st / 2], [c.lat + st / 2, c.lon + st / 2]];
+      var r = L.rectangle(b, {color:col, weight:k === 4 ? 3 : 1.5, dashArray:k === best ? '6 4' : null, fillOpacity:k === 4 ? 0.14 : 0.05}).addTo(map);
+      r.bindTooltip('<b>' + (c.elev === null || c.elev === undefined ? '–' : fmtK(c.elev) + ' m') + '</b><br>' + (c.p === null ? '–' : fmt(c.p, 0) + ' mm'), {permanent:true, direction:'center', className:'cxt'});
+      all.push(b[0], b[1]);
+    });
+    L.circleMarker([CONFIG.lat, CONFIG.lon], {radius:6, color:'#fff', weight:2, fillColor:'#000', fillOpacity:1}).addTo(map).bindTooltip('Punto que pide la página');
+    map.fitBounds(all, {padding:[8, 8]});
+    LMAP = map; LMODEL = id;
+    setTimeout(function(){ map.invalidateSize(); }, 200);
+    var note = H('p', {'class':'cx-s'}, 'Recuadro grueso: celda del panel. Discontinuo: la de altura más cercana a tu cota. Cada celda muestra su altura media y la lluvia prevista en 48 h.', box);
+  }, function(){
+    clear(box); H('p', {'class':'cx-s'}, 'No se pudo cargar el mapa (¿sin conexión?). La tabla de arriba tiene los mismos datos.', box);
+  });
 }
 
 /* ================= Controles ================= */
@@ -1184,11 +1352,15 @@ function renderControls(){
   $('ratio').value = state.ratio; $('ratioOut').textContent = state.ratio + ' cm por mm';
   var lg = $('legend'); clear(lg);
   MODELS.forEach(function(m){
-    var b = H('button', {type:'button', 'class':'chip', 'aria-pressed':String(!!state.vis[m.id]), title:'Mostrar u ocultar ' + m.name}, null, lg);
+    var b = H('button', {type:'button', 'class':'chip', 'aria-pressed':String(!!state.vis[m.id]), title:'Mostrar u ocultar ' + m.name + (m.id === 'arome' ? '. Mismo modelo que el de 1,5 km; sus datos se usan igualmente para nubosidad, sol y cota 0 °C.' : '')}, null, lg);
     var k = H('span', {'class':'key'}, null, b); k.style.background = m.color;
     H('span', {'class':'nm'}, m.name, b);
     b.addEventListener('click', function(){ state.vis[m.id] = !state.vis[m.id]; persist(); renderControls(); renderAll(); });
   });
+  var an = $('aromeNote');
+  if(!an){ an = H('p', {id:'aromeNote', 'class':'hint'}, null, null); lg.parentNode.insertBefore(an, lg.nextSibling); }
+  an.hidden = !!state.vis.arome;
+  an.textContent = 'AROME 2,5 km oculto: es el mismo modelo que el de 1,5 km, con más variables. Se sigue usando para la nubosidad, el sol y la cota 0 °C. Púlsalo para ver su curva.';
 }
 
 /* ================= Render ================= */
@@ -1237,6 +1409,7 @@ function renderAll(){
 
 /* ================= Arranque ================= */
 $('refresh').addEventListener('click', function(){ loadAll(); });
+$('cellsBtn').addEventListener('click', loadCells);
 $('refModel').addEventListener('change', function(e){ state.ref = e.target.value; persist(); renderAll(); });
 $('phaseMode').addEventListener('change', function(e){ state.mode = e.target.value; persist(); renderAll(); });
 $('cut').addEventListener('input', function(e){ state.cut = parseFloat(e.target.value); $('cutOut').textContent = fmt(state.cut, 1) + ' °C'; persist(); renderAll(); });
