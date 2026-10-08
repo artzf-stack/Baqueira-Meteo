@@ -264,11 +264,11 @@ details.diag summary{cursor:pointer;font-size:13px;font-weight:600;min-height:32
   <section class="card">
     <details class="diag">
       <summary>Diagnóstico de datos</summary>
-      <p class="hint">Estado de cada llamada a Open-Meteo. Si algo no cuadra, copia este diagnóstico y envíalo.</p>
+      <p class="hint">Estado de cada llamada a Open-Meteo. Si algo no cuadra, copia este diagnóstico y envíalo. En «Celda» se ve la que se usa en cada cota; las desplazadas a mano llevan su desplazamiento en celdas (E = este, S = sur).</p>
       <div class="tbl-wrap"><table id="diagTbl"></table></div>
       <p><button class="btn" id="copyDiag" type="button">Copiar diagnóstico</button> <span class="muted" id="copyMsg"></span></p>
       <h3 class="cx-h">Celdas vecinas de cada modelo</h3>
-      <p class="hint">Pide a Open-Meteo las 9 celdas (3×3) que rodean a la que usa el panel, con su altura media y la lluvia prevista en 48 h, para valorar si alguna vecina representa mejor el relieve. Solo se consulta al pulsar el botón (una petición por modelo).</p>
+      <p class="hint">Pide a Open-Meteo las 9 celdas (3×3) que rodean a la que usa el panel a la cota elegida (la central), con su altura media y la lluvia prevista en 48 h, para valorar si alguna vecina representa mejor el relieve. Solo se consulta al pulsar el botón (una petición por modelo).</p>
       <p><button class="btn" id="cellsBtn" type="button">Consultar celdas vecinas</button> <span class="muted" id="cellsMsg"></span></p>
       <div id="cellsOut"></div>
     </details>
@@ -299,6 +299,14 @@ var CONFIG = {
     {m:2200, label:'2.200 m'},
     {m:2500, label:'2.500 m'}
   ],
+  // Celda de cada modelo para cada cota, elegida a mano sobre el mapa: desplazamiento en celdas [este, sur] respecto
+  // a la celda que contiene el punto (lat, lon). Positivo = hacia el este / hacia el sur. Sin entrada = la celda del punto.
+  cells: {
+    arome_hd: {1500:[1, 0], 1800:[2, 0], 2200:[3, 1], 2500:[3, 1]},
+    arome:    {1800:[1, 0], 2200:[2, 0], 2500:[2, 0]},
+    icon:     {1500:[1, 0], 1800:[1, 0], 2200:[1, 0], 2500:[1, 0]},
+    ifs:      {}
+  },
   windows: [24, 48, 72]
 };
 var API = 'https://api.open-meteo.com/v1/forecast';
@@ -320,6 +328,17 @@ var MODELS = [
    surface:['temperature_2m','precipitation','rain','showers','wind_speed_10m','wind_direction_10m','wind_gusts_10m','cloud_cover'].concat(CLOUD_VARS), levels:'native'}
 ];
 var MODEL_BY_ID = {};
+var CELLSTEP = {arome_hd:0.01, arome:0.025, icon:0.0625, ifs:0.1};   // paso de rejilla esperado de cada modelo (°)
+// Punto que se pide a Open-Meteo para un modelo y una cota. Sin desplazamiento: el punto base (la celda más cercana).
+// Con desplazamiento: el centro de la celda elegida (centro de la celda del punto + desplazamiento × paso de rejilla).
+// cl/co = centro esperado de la celda, para comprobar en el diagnóstico que la rejilla real es la supuesta.
+function cellTarget(model, altM){
+  var st = CELLSTEP[model.id], sh = (CONFIG.cells && CONFIG.cells[model.id] || {})[altM] || [0, 0];
+  var cl = Math.round(CONFIG.lat / st) * st, co = Math.round(CONFIG.lon / st) * st, e = sh[0] || 0, so = sh[1] || 0;
+  cl = +(cl - so * st).toFixed(4); co = +(co + e * st).toFixed(4);
+  if(!e && !so) return {lat:CONFIG.lat, lon:CONFIG.lon, cl:cl, co:co, e:0, s:0};
+  return {lat:cl, lon:co, cl:cl, co:co, e:e, s:so};
+}
 MODELS.forEach(function(m){ MODEL_BY_ID[m.id] = m; m.ok = false; m.err = null; m.A = null; m.L = null; m.loading = false; m.stale = false; });
 
 /* ================= Estado ================= */
@@ -403,9 +422,12 @@ function niceScale(min, max, count){
 /* ================= Carga de datos ================= */
 function buildUrl(model, vars, multi){
   var n = multi ? CONFIG.altitudes.length : 1, lat = [], lon = [], el = [];
-  for(var i = 0; i < n; i++){ lat.push(CONFIG.lat); lon.push(CONFIG.lon); if(multi) el.push(CONFIG.altitudes[i].m); }
+  for(var i = 0; i < n; i++){
+    var t = multi ? cellTarget(model, CONFIG.altitudes[i].m) : {lat:CONFIG.lat, lon:CONFIG.lon};
+    lat.push(t.lat); lon.push(t.lon); if(multi) el.push(CONFIG.altitudes[i].m);
+  }
   var p = ['latitude=' + lat.join(','), 'longitude=' + lon.join(',')];
-  if(multi) p.push('elevation=' + el.join(','));
+  if(multi) p.push('elevation=' + el.join(','), 'cell_selection=nearest');   // nearest: la celda la fija nuestro punto, no la que Open-Meteo prefiera
   p.push('hourly=' + vars.join(','), 'models=' + model.api, 'forecast_hours=' + CONFIG.hours,
          'timezone=' + encodeURIComponent(CONFIG.tz), 'wind_speed_unit=kmh', 'precipitation_unit=mm', 'temperature_unit=celsius');
   return API + '?' + p.join('&');
@@ -479,7 +501,7 @@ function loadSurface(model){
     model.rawTimes = h0.time;
     model.raw = arr.map(function(o){ return o.hourly; });
     model.grid = {lat:arr[0].latitude, lon:arr[0].longitude, elev:arr[0].elevation};
-    model.grids = arr.map(function(o, k){ return {alt:CONFIG.altitudes[k] ? CONFIG.altitudes[k].m : null, lat:o.latitude, lon:o.longitude, elev:o.elevation}; });
+    model.grids = arr.map(function(o, k){ var a = CONFIG.altitudes[k] ? CONFIG.altitudes[k].m : null; return {alt:a, lat:o.latitude, lon:o.longitude, elev:o.elevation, tgt:a ? cellTarget(model, a) : null, mid:model.id}; });
     var temps = h0.temperature_2m || [], n = 0;
     for(var i = 0; i < temps.length; i++){ if(temps[i] !== null) n++; }
     d.ok = true; d.msg = note; d.url = url; d.hours = n; d.empty = emptyVars(h0, usedVars); d.grid = model.grid; d.grids = model.grids; d.ms = Date.now() - d.t0;
@@ -1153,13 +1175,22 @@ function renderHourly(){
     H('td', null, C && C[i] !== null ? fmt(C[i], 0) + ' %' : '–', tr);
   }
 }
-// Centro de la celda que Open-Meteo usó (latitud, longitud). Con varias cotas puede variar de una a otra.
+// Celda que Open-Meteo usó en cada cota (centro: latitud, longitud), con el desplazamiento elegido y un aviso si no es la esperada.
+function cellTag(g){
+  var t = g.tgt, out = '';
+  if(t && (t.e || t.s)){
+    out = ' (' + [t.e ? Math.abs(t.e) + (t.e > 0 ? ' E' : ' O') : '', t.s ? Math.abs(t.s) + (t.s > 0 ? ' S' : ' N') : ''].filter(Boolean).join(', ') + ')';
+  }
+  var st = CELLSTEP[g.mid];
+  if(t && st && (Math.abs(g.lat - t.cl) > st * 0.45 || Math.abs(g.lon - t.co) > st * 0.45)){
+    out += ' ⚠ se esperaba ' + fmt(t.cl, 4) + ', ' + fmt(t.co, 4);
+  }
+  return out;
+}
 function gridText(d){
   var gs = d.grids;
   if(gs && gs.length > 1){
-    var f = gs[0], same = gs.every(function(g){ return g.lat === f.lat && g.lon === f.lon; });
-    if(same) return fmt(f.lat, 4) + ', ' + fmt(f.lon, 4) + ' (igual a todas las cotas)';
-    return gs.map(function(g){ return fmtK(g.alt) + ' m: ' + fmt(g.lat, 4) + ', ' + fmt(g.lon, 4); }).join(' · ');
+    return gs.map(function(g){ return fmtK(g.alt) + ' m: ' + fmt(g.lat, 4) + ', ' + fmt(g.lon, 4) + cellTag(g); }).join(' · ');
   }
   return d.grid ? fmt(d.grid.lat, 4) + ', ' + fmt(d.grid.lon, 4) : '–';
 }
@@ -1190,7 +1221,7 @@ function diagText(){
     var st = d.ok === null ? 'PENDIENTE ' + Math.round((Date.now() - d.t0) / 1000) + ' s' : d.ok ? 'ok' : 'ERROR';
     lines.push([d.model, d.kind, st, d.msg || '', d.hours + ' h', d.ms === null ? '–' : (d.ms / 1000).toFixed(1) + ' s',
                 'sin datos: ' + (d.empty && d.empty.length ? d.empty.join(',') : 'nada'),
-                'celda: ' + (d.grids && d.grids.length ? d.grids.map(function(g){ return (g.alt || '') + 'm=' + g.lat + ',' + g.lon; }).join(' ') : d.grid ? d.grid.lat + ',' + d.grid.lon : '–'),
+                'celda: ' + (d.grids && d.grids.length ? d.grids.map(function(g){ return (g.alt || '') + 'm=' + g.lat + ',' + g.lon + cellTag(g); }).join(' ') : d.grid ? d.grid.lat + ',' + d.grid.lon : '–'),
                 d.url].join(' | '));
   });
   if(CELLS.data){
@@ -1204,7 +1235,6 @@ function diagText(){
 }
 
 /* ================= Celdas vecinas (solo en el diagnóstico, bajo demanda) ================= */
-var CELLSTEP = {arome_hd:0.01, arome:0.025, icon:0.0625, ifs:0.1};   // paso de rejilla esperado de cada modelo (°)
 var CELLS = {busy:false, data:null, alt:null, at:null};              // data[id] = {c:{lat,lon}, pts:[9 celdas] | err}
 var LMAP = null, LMODEL = null;
 function cellCenter(m){
