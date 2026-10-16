@@ -206,12 +206,18 @@ details.diag summary{cursor:pointer;font-size:13px;font-weight:600;min-height:32
         <input type="range" id="cut" min="-1" max="3" step="0.5" value="1">
         <output id="cutOut" for="cut"></output>
       </label>
-      <label for="ratio">Relación nieve/agua
+      <label for="ratioMode">Relación nieve/agua
+        <select id="ratioMode">
+          <option value="temp">Según la temperatura de cada hora</option>
+          <option value="fixed">Fija</option>
+        </select>
+      </label>
+      <label for="ratio"><span id="ratioLbl">Ajuste de la curva</span>
         <input type="range" id="ratio" min="5" max="20" step="1" value="10">
         <output id="ratioOut" for="ratio"></output>
       </label>
     </div>
-    <p class="hint">Con "temperatura a la cota", todo es nieve por debajo del corte menos 1 °C, todo es lluvia por encima del corte más 1 °C y entre ambos se reparte. Los centímetros de nieve son una estimación: agua equivalente por la relación elegida. Con "fase que da el modelo", los modelos que no publican la lluvia por separado (AROME 1,5 km en Open-Meteo) siguen usando la temperatura.</p>
+    <p class="hint">Con "temperatura a la cota", todo es nieve por debajo del corte menos 1 °C, todo es lluvia por encima del corte más 1 °C y entre ambos se reparte. Los centímetros de nieve son una estimación: agua equivalente por la relación nieve/agua (10:1 son 10 mm de nieve por cada mm de agua, es decir, 1 cm por mm). "Según la temperatura" usa una curva aproximada hora a hora (unos 7:1 con nieve cerca de 0 °C, 10:1 a −4 °C, 14:1 a −10 °C y más de 16:1 con frío intenso) y el deslizador la multiplica; "Fija" aplica la misma relación a todas las horas. Con "fase que da el modelo", los modelos que no publican la lluvia por separado (AROME 1,5 km en Open-Meteo) siguen usando la temperatura.</p>
   </details>
 
   <div class="banner" id="banner" hidden></div>
@@ -344,11 +350,11 @@ MODELS.forEach(function(m){ MODEL_BY_ID[m.id] = m; m.ok = false; m.err = null; m
 /* ================= Estado ================= */
 var STORE_KEY = 'baqueira-meteo-v1';
 var STORE_VER = 2;   // v2: el AROME 2,5 km pasa a estar oculto por defecto (mismo modelo que el de 1,5 km)
-var state = {v:STORE_VER, alt:1800, win:48, ref:'arome_hd', mode:'temp', cut:1, ratio:10, vis:{arome_hd:true, arome:false, ifs:true, icon:true}};
+var state = {v:STORE_VER, alt:1800, win:48, ref:'arome_hd', mode:'temp', cut:1, ratio:10, rmode:'temp', vis:{arome_hd:true, arome:false, ifs:true, icon:true}};
 try{
   var saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
   if(saved){
-    ['alt','win','ref','mode','cut','ratio'].forEach(function(k){ if(saved[k] !== undefined) state[k] = saved[k]; });
+    ['alt','win','ref','mode','cut','ratio','rmode'].forEach(function(k){ if(saved[k] !== undefined) state[k] = saved[k]; });
     if(saved.vis) MODELS.forEach(function(m){ if(saved.vis[m.id] !== undefined) state.vis[m.id] = !!saved.vis[m.id]; });
     if((saved.v || 1) < STORE_VER) state.vis.arome = false;   // ajustes guardados con la versión anterior
   }
@@ -621,13 +627,30 @@ function ser(model, name){
 function nullArr(){ var a = new Array(MASTER.length); for(var i = 0; i < a.length; i++) a[i] = null; return a; }
 function hasData(arr){ if(!arr) return false; for(var i = 0; i < arr.length; i++){ if(arr[i] !== null) return true; } return false; }
 
+// Relación nieve/agua según la temperatura (°C) a la cota: más húmeda y pesada cerca de 0 °C, más ligera con frío.
+// Puntos aproximados de la literatura (relación media ~10:1 hacia −4 °C); interpolación lineal, constante fuera de rango.
+var SLR_CURVE = [[-16, 17], [-10, 14], [-6, 11.5], [-3, 9], [0, 7], [2, 6]];
+function slrCurve(t){
+  var c = SLR_CURVE, n = c.length;
+  if(t <= c[0][0]) return c[0][1];
+  if(t >= c[n - 1][0]) return c[n - 1][1];
+  for(var i = 1; i < n; i++){
+    if(t <= c[i][0]){ var a = c[i - 1], b = c[i]; return a[1] + (b[1] - a[1]) * (t - a[0]) / (b[0] - a[0]); }
+  }
+  return 10;
+}
+// Relación aplicada a una hora: fija, o curva por temperatura multiplicada por el ajuste (ratio/10).
+function slrAt(t){
+  if(state.rmode === 'fixed') return state.ratio;
+  return (t === null || t === undefined ? 10 : slrCurve(t)) * state.ratio / 10;
+}
 // Reparte la precipitación de cada hora en lluvia y nieve (mm de agua equivalente).
 function phase(model){
-  var key = model.id + '|' + state.alt + '|' + state.mode + '|' + state.cut + '|' + state.ratio;
+  var key = model.id + '|' + state.alt + '|' + state.mode + '|' + state.cut + '|' + state.ratio + '|' + state.rmode;
   if(phaseCache[key]) return phaseCache[key];
   var P = ser(model, 'precipitation'), T = ser(model, 'temperature_2m');
   var R = ser(model, 'rain'), SH = ser(model, 'showers');
-  var n = MASTER.length, out = {rain:nullArr(), snow:nullArr(), total:nullArr(), snowCm:nullArr(), native:false};
+  var n = MASTER.length, out = {rain:nullArr(), snow:nullArr(), total:nullArr(), snowCm:nullArr(), slr:nullArr(), native:false};
   if(!P){ phaseCache[key] = out; return out; }
   var useModel = state.mode === 'model' && hasData(R);
   out.native = useModel;
@@ -644,7 +667,7 @@ function phase(model){
       var f = T[i] <= lo ? 1 : T[i] >= hi ? 0 : (hi - T[i]) / (hi - lo);
       snow = p * f; rain = p - snow;
     } else { rain = p; snow = 0; }
-    out.rain[i] = rain; out.snow[i] = snow; out.total[i] = p; out.snowCm[i] = snow * state.ratio / 1;
+    out.rain[i] = rain; out.snow[i] = snow; out.total[i] = p; var rt = slrAt(T && T[i] !== null ? T[i] : null); out.slr[i] = rt; out.snowCm[i] = snow * rt / 10;
   }
   phaseCache[key] = out;
   return out;
@@ -667,7 +690,7 @@ function modelStats(model){
   var T = sliceStats(ser(model, 'temperature_2m'), N), ph = phase(model);
   var P = sliceStats(ph.total, N), SN = sliceStats(ph.snow, N);
   var G = sliceStats(ser(model, 'wind_gusts_10m'), N), W = sliceStats(ser(model, 'wind_speed_10m'), N);
-  return {tmin:T.min, tmax:T.max, hours:T.n, precip:P.n ? P.sum : null, snowCm:SN.n ? SN.sum * state.ratio : null,
+  return {tmin:T.min, tmax:T.max, hours:T.n, precip:P.n ? P.sum : null, snowCm:SN.n ? sliceStats(ph.snowCm, N).sum : null, slr:SN.sum > 0.05 ? sliceStats(ph.snowCm, N).sum * 10 / SN.sum : null,
           gust:G.max, wind:W.max};
 }
 function levelSeries(model){
@@ -836,7 +859,7 @@ function renderPrecip(){
     var key = H('span', {'class':'key'}, null, head); key.style.background = s.m.color;
     H('b', null, s.m.name, head);
     var tot = fmt(st.sum, 0) + ' mm en ' + st.n + ' h';
-    if(sn.sum > 0.05) tot += ' · ≈ ' + fmt(sn.sum * state.ratio, 0) + ' cm de nieve';
+    if(sn.sum > 0.05) tot += ' · ≈ ' + fmt(sliceStats(s.ph.snowCm, N).sum, 0) + ' cm de nieve';
     H('span', {'class':'tot'}, tot, head);
     var wrap = H('div', {'class':'chart'}, null, panel);
     var c = baseChart(wrap, {height:116, n:N, times:times, y:y, centered:true, left:36, yFmt:function(v){ return fmt(v, v % 1 ? 1 : 0); },
@@ -861,7 +884,7 @@ function renderPrecip(){
         {color:'var(--rain)', name:'Lluvia', value:fmt(s.ph.rain[i], 1) + ' mm'},
         {color:'var(--snow-ink)', name:'Nieve (agua)', value:fmt(s.ph.snow[i], 1) + ' mm'}
       ];
-      if(s.ph.snow[i] > 0.05) items.push({color:null, name:'Nieve estimada', value:'≈ ' + fmt(s.ph.snowCm[i], 1) + ' cm'});
+      if(s.ph.snow[i] > 0.05) items.push({color:null, name:'Nieve estimada', value:'≈ ' + fmt(s.ph.snowCm[i], 1) + ' cm (' + fmt(s.ph.slr[i], 0) + ':1)'});
       return {title:s.m.name + ' · ' + fmtHour(times[i]), items:items};
     });
   });
@@ -1094,7 +1117,7 @@ function renderTiles(){
   var win = state.win + ' h';
   tile(host, 'Temperatura a ' + altLabel(), st.tmin === null ? '–' : fmt(st.tmin, 0) + ' / ' + fmt(st.tmax, 0), '°C', 'mín / máx · ' + rm.name);
   tile(host, 'Precipitación', fmt(st.precip, 0), 'mm', 'en ' + st.hours + ' h con datos · ' + win);
-  tile(host, 'Nieve estimada', fmt(st.snowCm, 0), 'cm', 'a ' + altLabel() + ', relación ' + state.ratio + ':1');
+  tile(host, 'Nieve estimada', fmt(st.snowCm, 0), 'cm', 'a ' + altLabel() + ', ' + ratioNote(st.slr));
   tile(host, 'Racha máxima', fmt(st.gust, 0), 'km/h', 'viento medio máx. ' + fmt(st.wind, 0) + ' km/h');
   var lm = bestLevels();
   if(lm){
@@ -1136,7 +1159,7 @@ function renderHourly(){
   var rm = refModel(), N = winLen();
   if(!rm){ return; }
   var cm = pickModel('cloud_cover');
-  $('hHint').textContent = rm.name + ' a ' + altLabel() + '. Viento: la letra es de dónde sopla y la flecha hacia dónde va. Los centímetros de nieve son una estimación con relación ' + state.ratio + ':1.' +
+  $('hHint').textContent = rm.name + ' a ' + altLabel() + '. Viento: la letra es de dónde sopla y la flecha hacia dónde va. Los centímetros de nieve son una estimación, ' + ratioNote(null) + '.' +
     (cm && cm.id !== rm.id ? ' Las nubes son de ' + cm.name + '.' : '');
   var head = H('tr', null, null, H('thead', null, null, tbl));
   ['Hora', 'T °C', 'Precip. mm', 'Fase', 'Nieve cm', 'Viento km/h', 'Racha', 'Nubes'].forEach(function(t){ H('th', null, t, head); });
@@ -1361,6 +1384,16 @@ function showCellMap(id){
 }
 
 /* ================= Controles ================= */
+// Relación nieve/agua: 10:1 = 10 mm de nieve por cada mm de agua = 1 cm de nieve por mm.
+function ratioText(){
+  if(state.rmode === 'fixed') return state.ratio + ':1 · ' + fmt(state.ratio / 10, 1) + ' cm por mm';
+  return '× ' + fmt(state.ratio / 10, 1) + (state.ratio === 10 ? ' (curva sin ajustar)' : '');
+}
+// Descripción corta de la relación usada, para los textos de apoyo (avg = relación media efectiva de la ventana).
+function ratioNote(avg){
+  if(state.rmode === 'fixed') return 'relación ' + state.ratio + ':1';
+  return 'relación según la temperatura' + (avg ? ' (media ' + fmt(avg, 0) + ':1)' : '') + (state.ratio === 10 ? '' : ', ajustada × ' + fmt(state.ratio / 10, 1));
+}
 function renderControls(){
   var sa = $('seg-alt'); clear(sa);
   CONFIG.altitudes.forEach(function(a){
@@ -1379,7 +1412,7 @@ function renderControls(){
   });
   $('phaseMode').value = state.mode;
   $('cut').value = state.cut; $('cutOut').textContent = fmt(state.cut, 1) + ' °C';
-  $('ratio').value = state.ratio; $('ratioOut').textContent = state.ratio + ' cm por mm';
+  $('ratio').value = state.ratio; $('ratioOut').textContent = ratioText(); $('ratioMode').value = state.rmode; $('ratioLbl').textContent = state.rmode === 'fixed' ? 'Relación nieve/agua elegida' : 'Ajuste de la curva';
   var lg = $('legend'); clear(lg);
   MODELS.forEach(function(m){
     var b = H('button', {type:'button', 'class':'chip', 'aria-pressed':String(!!state.vis[m.id]), title:'Mostrar u ocultar ' + m.name + (m.id === 'arome' ? '. Mismo modelo que el de 1,5 km; sus datos se usan igualmente para nubosidad, sol y cota 0 °C.' : '')}, null, lg);
@@ -1441,9 +1474,10 @@ function renderAll(){
 $('refresh').addEventListener('click', function(){ loadAll(); });
 $('cellsBtn').addEventListener('click', loadCells);
 $('refModel').addEventListener('change', function(e){ state.ref = e.target.value; persist(); renderAll(); });
+$('ratioMode').addEventListener('change', function(e){ state.rmode = e.target.value; persist(); renderControls(); renderAll(); });
 $('phaseMode').addEventListener('change', function(e){ state.mode = e.target.value; persist(); renderAll(); });
 $('cut').addEventListener('input', function(e){ state.cut = parseFloat(e.target.value); $('cutOut').textContent = fmt(state.cut, 1) + ' °C'; persist(); renderAll(); });
-$('ratio').addEventListener('input', function(e){ state.ratio = parseInt(e.target.value, 10); $('ratioOut').textContent = state.ratio + ' cm por mm'; persist(); renderAll(); });
+$('ratio').addEventListener('input', function(e){ state.ratio = parseInt(e.target.value, 10); $('ratioOut').textContent = ratioText(); persist(); renderAll(); });
 $('copyDiag').addEventListener('click', function(){
   var txt = diagText(), msg = $('copyMsg');
   function fallback(){
